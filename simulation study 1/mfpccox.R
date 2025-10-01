@@ -1,5 +1,3 @@
-
-
 rm(list = ls())
 library(MASS)
 library(survival)
@@ -11,22 +9,19 @@ library(mvtnorm)
 library(Landmarking)
 library(nlme)
 library(dplyr)
-
 library(JMbayes2)
 library(refund)
 
 #setwd("/Users/user/Desktop/Rcodes/PP_TM/New_stan/11th")#
 setwd("C:\\Users\\p80744tb\\Desktop\\PP_TM\\PP_TM\\New_stan\\11th")
-
 source("iauc_sd.R")
+
 # ----------------------------
 # Simulation parameters
 # ----------------------------
-
 NN=100
 Esti=CovR=matrix(0,NN,3)
 Results=list()
-
 
 for(kkk in 1:NN){ 
   set.seed(kkk)
@@ -59,7 +54,7 @@ for(kkk in 1:NN){
   
   haz_fun_i <- function(s, x1i, x2i, w1i, w2i, ui) {
     eta <- gamma_w[1]*w1i + gamma_w[2]*w2i +
-      alpha*(Beta[1] + Beta[2]*x1i + Beta[3]*x2i + Beta[3]*s + ui[1] + ui[2]*s)
+      alpha*(Beta[1] + Beta[2]*x1i + Beta[3]*x2i + Beta[4]*s + ui[1] + ui[2]*s)
     exp(eta)
   }
   
@@ -95,7 +90,7 @@ for(kkk in 1:NN){
     
     for (j in seq_along(t)) {
       if (t[j] <= obs_time) {
-        Y1[i,j] <- Beta[1]+Beta[2]*x1[i]+Beta[3]*x2[i]+Beta[4]*t[j] +
+        Y1[i,j] <- Beta[1]+Beta[2]*x1[i]+Beta[3]*x2[i]+Beta[4]*t[j]+
           u[i,1]+u[i,2]*t[j]+rnorm(1,0,sigma)
       } else Y1[i,j] <- NA_real_
     }
@@ -137,34 +132,13 @@ for(kkk in 1:NN){
   surv_train <- subset(surv.data, id %in% train_ids)
   surv_valid <- subset(surv.data, id %in% valid_ids)
   
-  
-  
-  # Quick checks
-  
-  mean(table(long.data$id))
-  median(table(long.data$id))
-  min(table(long.data$id))
-  max(table(long.data$id))
-  
-  mean(surv.data$survtime)
-  mean(surv.data$Event)
-  
-  
-  
-  
   #===============================================================================
-  #============================ MFPCCOX ===========================================
-  #===============================================================================
-  
-  #===============================================================================
-  #============================ MFPCCOX (Corrected) ===========================================
+  #============================ MFPCCOX (Corrected for BS) =======================
   #===============================================================================
   start1 <- Sys.time()
   source("C:/Users/p80744tb/Desktop/intensive/functions.R")
   
-  ################################################################################
   # --- FPCA on training data ---
-  ################################################################################
   Ytrain_mat <- matrix(NA, nrow = length(train_ids), ncol = length(t))
   for (i in seq_along(train_ids)) {
     tmp <- subset(long_train, id == train_ids[i])
@@ -177,26 +151,21 @@ for(kkk in 1:NN){
   
   sc_train <- as.data.frame(ufpca$scores)
   colnames(sc_train) <- paste0("rho", 1:K)
-  surv_train_model <- surv_train %>% select(-id)  # remove id from Cox model
+  surv_train_model <- surv_train %>% select(-id)
   surv_train_model <- cbind(surv_train_model, sc_train)
   
   CoxFit <- coxph(Surv(survtime, Event) ~ ., data = surv_train_model, x = TRUE)
   
-  ################################################################################
   # --- Prediction for validation set ---
-  ################################################################################
   S <- landmarks <- c(0.25, 0.5, 0.75, 1)
   t_pred <- horizons <- 0.25
-  delta_t <- t[2] - t[1]  # time step for projection
+  delta_t <- t[2] - t[1]
   
   project_scores <- function(fpca, newY) {
-    # newY: vector of length t, may contain NAs
-    idx <- !is.na(newY)
-    if (sum(idx) == 0) return(rep(0, ncol(fpca$efunctions)))
-    
-    Y_centered <- newY[idx] - fpca$mu[idx]
-    scores <- t(Y_centered) %*% fpca$efunctions[idx, , drop=FALSE] * delta_t
-    as.numeric(scores)
+    newY[is.na(newY)] <- fpca$mu[is.na(newY)]
+    Y_centered <- newY - fpca$mu
+    scores <- as.numeric(t(Y_centered) %*% fpca$efunctions * delta_t)
+    return(scores)
   }
   
   results <- list()
@@ -208,19 +177,25 @@ for(kkk in 1:NN){
         this_surv <- subset(surv_valid, id == iid)
         if (nrow(this_surv) == 0) return(NULL)
         
+        # Prepare trajectory
         Ytest <- rep(NA, length(t))
         idx <- sapply(this_long$obstime, function(tt) which.min(abs(t - tt)))
         Ytest[idx] <- this_long$Y1
         
+        # Project FPCA scores
         sc <- project_scores(ufpca, Ytest)
+        
         sc_full <- rep(0, K)
         sc_full[1:length(sc)] <- sc
         sc_df <- as.data.frame(as.list(sc_full))
         colnames(sc_df) <- paste0("rho", 1:K)
         
+        # Conditional survival from t0
         newdata <- cbind(this_surv %>% select(-id), sc_df)
         sf <- survfit(CoxFit, newdata = newdata)
-        p <- tryCatch(summary(sf, times = t0 + dt)$surv, error = function(e) NA)
+        S_t0 <- tryCatch(summary(sf, times = t0)$surv, error = function(e) 1)
+        S_t0dt <- tryCatch(summary(sf, times = t0 + dt)$surv, error = function(e) NA)
+        p <- S_t0dt / S_t0
         
         data.frame(id = iid, landmark = t0, horizon = dt, pred = p)
       })
@@ -229,11 +204,9 @@ for(kkk in 1:NN){
   }
   
   pred_all <- do.call(rbind, results)
-  
-  # Optional: split by landmark with correct order
   pred_by_landmark <- split(pred_all, factor(pred_all$landmark, levels = S))
   
-  # iAUC / iBS computation
+  # --- iAUC / iBS computation ---
   est3 <- sd3 <- matrix(0, length(S), 2)
   
   for (i in seq_along(S)) {
@@ -261,64 +234,53 @@ for(kkk in 1:NN){
     B = 200
   )
   
-  c(res_inc3$iAUC, res_inc3$sd_iAUC)
-  c(res_inc3$iBS, res_inc3$sd_iBS)
-  est3
+  cat("Simulation", kkk, "- iAUC:", res_inc3$iAUC, "iBS:", res_inc3$iBS, "\n")
   
   end1 <- Sys.time()
   time_MFPCCOX <- difftime(end1, start1, units = "mins")
-  time_MFPCCOX
   
-  
-  
-  res_inc3 <- compute_iAUC_iBS(
-    s = S,
-    auc_mat=cbind(est3[,1],sd3[,1]), bs_mat=cbind(est3[,2],sd3[,2]), 
-    survtime=surv_valid$survtime, death=surv_valid$Event, t_pred=t_pred,
-    type = "incident",     # or "cumulative"
-    estimate_sd = TRUE, 
-    B = 200
+  Results[[kkk]] <- list(
+    est3 = est3,
+    AUCi_mfpcox = res_inc3$iAUC,
+    BSi_mfpcox = res_inc3$iBS,
+    time_MFPCCOX = time_MFPCCOX
   )
   
-  
-  c(res_inc3$iAUC,res_inc3$sd_iAUC)
-  c(res_inc3$iBS,res_inc3$sd_iBS)
-  est3
-  end1 <- Sys.time()
-  time_MFPCCOX=difftime(end1,start1,units ="mins")
-  
-  
-  
-  end1 <- Sys.time()
-  time_TS=difftime(end1,start1,units ="mins")
-  
-  Results[[kkk]]=list(
-    
-    est3=est3,AUCi_mfpcox=res_inc3$iAUC,BSi_mfpcox=res_inc3$iBS,
-    time_MFPCCOX=time_MFPCCOX)
-  
-  print(rep(kkk,10))
-  
+  print(rep(kkk, 10))
 }
 
+# ----------------------------
+# Summarize results
+# ----------------------------
+Time1 <- matrix(0, NN, 2)
+Cr2 <- matrix(0, NN, 10)
 
-
-
-
-Time1=matrix(0,NN,2)
-Cr1=Cr2=matrix(0,NN,10)
-Est=CR=matrix(0,NN,2)
-for(kkk in c(1:NN)){ 
-  
-  Time1[kkk,2]=Results[[kkk]]$time_MFPCCOX
-  
-  Cr2[kkk,]=c(as.numeric(Results[[kkk]]$est3),c(Results[[kkk]]$AUCi_mfpcox,Results[[kkk]]$BSi_mfpcox))
-  
-  
+for(kkk in 1:NN){ 
+  Time1[kkk,2] <- Results[[kkk]]$time_MFPCCOX
+  Cr2[kkk,] <- c(as.numeric(Results[[kkk]]$est3), 
+                 c(Results[[kkk]]$AUCi_mfpcox, Results[[kkk]]$BSi_mfpcox))
 }
 
+cat("Average computation time:\n")
+cbind(apply(Time1,2,mean),apply(Time1,2,sd))
+
+cat("Average iAUC/iBS and Crit estimates:\n")
+cbind(apply(Cr2,2,mean,na.rm=TRUE),apply(Cr2,2,sd,na.rm=TRUE))
 
 
-cbind(apply(Time1,2,mean),apply(Time1,2,sd))#time
-cbind(apply(Cr2,2,mean),apply(Cr2,2,sd))#mfpccox
-
+cbind(apply(Cr2,2,mean,na.rm=TRUE),apply(Cr2,2,sd,na.rm=TRUE))
+[,1]       [,2]
+[1,] 0.6811264 0.05419982
+[2,] 0.6855061 0.06875940
+[3,] 0.7035090 0.07413872
+[4,] 0.6684259 0.12262031
+[5,] 0.1651592 0.01697067
+[6,] 0.1714024 0.03488604
+[7,] 0.1589580 0.03566373
+[8,] 0.1393359 0.04503028
+[9,] 0.6837810 0.04216650
+[10,] 0.1651976 0.01699528
+> cbind(apply(Time1,2,mean),apply(Time1,2,sd))
+[,1]      [,2]
+[1,] 0.0000000 0.0000000
+[2,] 0.4211049 0.1338871
