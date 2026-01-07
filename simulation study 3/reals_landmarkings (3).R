@@ -13,10 +13,7 @@ library(dplyr)
 library(JMbayes2)
 library(refund)
 
-#setwd("/Users/user/Desktop/Rcodes/PP_TM/New_stan/11th")#
-setwd("/Users/user/Desktop/Rcodes/PP_TM/New_stan/11th")#
-#setwd("C:\\Users\\p80744tb\\Desktop\\PP_TM\\PP_TM\\New_stan\\11th")
-source("iauc_sd.R")
+
 # ----------------------------
 # Simulation parameters
 # ----------------------------
@@ -25,15 +22,16 @@ NN=100
 Estijm=CovRjm=matrix(0,NN,3)
 Results1=list()
 for(kkk in 1:NN){ 
+  
   set.seed(kkk)
   
   nsample <- 1000
   alpha   <- -0.5
-  Beta    <- c(-0.5, -0.5, 0.5, 0.5)
+  Beta    <- c(-0.5, -0.5, 0.5)
   sigma   <- 1
   gamma_w <- c(0.2, -0.2)
   followup <- 2
-  t <- seq(from = 0, to = followup, by = 0.005)
+  t <- seq(from = 0, to = followup, by = 0.05)
   
   # Covariates and random effects
   x1 <- x2 <- w1 <- w2 <- rep(NA_real_, nsample)
@@ -55,9 +53,11 @@ for(kkk in 1:NN){
   
   haz_fun_i <- function(s, x1i, x2i, w1i, w2i, ui) {
     eta <- gamma_w[1]*w1i + gamma_w[2]*w2i +
-      alpha*(Beta[1] + Beta[2]*x1i + Beta[3]*x2i + sin(pi*s)+cos(pi*s) + ui[1] + ui[2]*s)
+      alpha*(Beta[1] + Beta[2]*x1i + Beta[3]*x2i + sin(pi*s) + cos(pi*s) + ui[1] + ui[2]*s)
     exp(eta)
   }
+  
+  
   
   cumhaz_i <- function(T, x1i, x2i, w1i, w2i, ui) {
     if (T <= 0) return(0)
@@ -91,7 +91,8 @@ for(kkk in 1:NN){
     
     for (j in seq_along(t)) {
       if (t[j] <= obs_time) {
-        Y1[i,j] <- Beta[1]+Beta[2]*x1[i]+Beta[3]*x2[i]+Beta[4]*t[j] +
+        Y1[i,j] <- Beta[1]+Beta[2]*x1[i]+Beta[3]*x2[i]+
+          sin(pi*t[j])+cos(pi*t[j]) +
           u[i,1]+u[i,2]*t[j]+rnorm(1,0,sigma)
       } else Y1[i,j] <- NA_real_
     }
@@ -171,16 +172,17 @@ for(kkk in 1:NN){
       
       # Last observed longitudinal value before landmark
       subj_long <- subset(long_valid, id == idv & obstime <= s)
+      f_s <- sin(pi * s) + cos(pi * s)
       
       if (nrow(subj_long) == 0) {
         # No history: use fixed effects only
-        X_landmark <- c(1, x1[idv], x2[idv], s)  # intercept, time, x1, x2
-        Y_pred_valid[i] <- sum(Beta * X_landmark)  # Beta[1]+Beta[2]*x1+...
+        X_landmark <- c(1, x1[idv], x2[idv])  # intercept, time, x1, x2
+        Y_pred_valid[i] <- sum(Beta * X_landmark)+ f_s  # Beta[1]+Beta[2]*x1+...
       } else {
         # Use true random effects (u) + fixed effects
-        X_landmark <- c(1, x1[idv], x2[idv], s)
+        X_landmark <- c(1, x1[idv], x2[idv])
         Z_landmark <- c(1, s)
-        Y_pred_valid[i] <- sum(Beta * X_landmark) + sum(Z_landmark * u[idv,])
+        Y_pred_valid[i] <- sum(Beta * X_landmark)+ f_s + sum(Z_landmark * u[idv,])
       }
     }
     
@@ -226,24 +228,102 @@ for(kkk in 1:NN){
   
   estr
   
-  # Compute incremental iAUC and iBS
-  res_incr <- compute_iAUC_iBS(
-    s = S,
-    auc_mat = cbind(estr[, 1], sdr[, 1]),
-    bs_mat  = cbind(estr[, 2], sdr[, 2]), 
-    survtime = surv_valid$survtime,
-    death    = surv_valid$Event,
-    t_pred   = t_pred,
-    type     = "incident",
-    estimate_sd = TRUE, 
-    B = 200
-  )
   
-  # Results
-  c(res_incr$iAUC, res_incr$sd_iAUC)
-  c(res_incr$iBS,  res_incr$sd_iBS)
+  
+  # ===============================================================
+  # REAL DYNAMIC PREDICTIONS
+  # ===============================================================
+  
+  S <- c(0.25, 0.5, 0.75, 1)   # Landmark times
+  t_pred <- 0.25               # Prediction horizon
+  
+  estr <- sdr <- matrix(NA_real_, length(S), 2)  # Store AUC / Brier
+  
+  dp_results <- list()
+  r <- 0
+  
+  for (s in S) {
+    r <- r + 1
+    
+    # Subjects still at risk at landmark
+    valid_at_risk <- subset(surv_valid, survtime >= s)
+    valid_ids <- valid_at_risk$id
+    n_risk <- length(valid_ids)
+    
+    if (n_risk == 0) {
+      estr[r, ] <- NA
+      sdr[r, ] <- NA
+      next
+    }
+    
+    # Predicted longitudinal values at landmark using true random effects
+    Y_pred_valid <- numeric(n_risk)
+    
+    for (i in seq_along(valid_ids)) {
+      idv <- valid_ids[i]
+      subj_long <- subset(long_valid, id == idv & obstime <= s)
+      f_s <- sin(pi * s) + cos(pi * s)
+      
+      if (nrow(subj_long) == 0) {
+        # No longitudinal history: use fixed effects only
+        X_landmark <- c(1, x1[idv], x2[idv])
+        Y_pred_valid[i] <- sum(Beta * X_landmark) + f_s
+      } else {
+        # Use true random effects
+        X_landmark <- c(1, x1[idv], x2[idv])
+        Z_landmark <- c(1, s)
+        Y_pred_valid[i] <- sum(Beta * X_landmark) + f_s + sum(Z_landmark * u[idv, ])
+      }
+    }
+    
+    # Compute true survival probability over horizon s -> s + t_pred
+    surv_pred <- numeric(n_risk)
+    
+    for (i in seq_along(valid_ids)) {
+      idv <- valid_ids[i]
+      
+      haz_fun <- function(t) {
+        gamma_w[1]*w1[idv] + gamma_w[2]*w2[idv] +
+          alpha * (
+            Beta[1] + Beta[2]*x1[idv] + Beta[3]*x2[idv] +
+              sin(pi*t) + cos(pi*t) +
+              u[idv,1] + u[idv,2]*t
+          )
+      }
+      
+      cumhaz <- integrate(function(t) exp(haz_fun(t)), lower = s, upper = s + t_pred)$value
+      surv_pred[i] <- exp(-cumhaz)
+    }
+    
+    dp_results[[paste0("S_", s)]] <- data.frame(
+      id = valid_ids,
+      surv_pred = surv_pred,
+      landmark = s,
+      horizon = s + t_pred
+    )
+    
+    # Compute AUC / Brier for at-risk subjects only
+    Crit <- Criteria(
+      s = s,
+      t = t_pred,
+      Survt = valid_at_risk$survtime,
+      CR = valid_at_risk$Event,
+      P = 1 - surv_pred,
+      cause = 1
+    )
+    
+    estr[r, ] <- Crit$Cri[,1]
+    sdr[r, ]  <- Crit$Cri[,2]
+  }
+  
+  # Column names
+  colnames(estr) <- c("AUC","Brier")
+  colnames(sdr)  <- c("AUC","Brier")
+  rownames(estr) <- rownames(sdr) <- S
+  
+  # Check results
   estr
-  
+  sdr
   
   #===============================================================================
   
@@ -394,18 +474,6 @@ for(kkk in 1:NN){
   
   
   
-  res_inc <- compute_iAUC_iBS(
-    s = S,
-    auc_mat=cbind(est[,1],sd[,1]), bs_mat=cbind(est[,2],sd[,2]), 
-    survtime=surv_valid$survtime, death=surv_valid$Event, t_pred=t_pred,
-    type = "incident",     # or "cumulative"
-    estimate_sd = TRUE, 
-    B = 200
-  )
-  
-  c(res_inc$iAUC,res_inc$sd_iAUC)
-  c(res_inc$iBS,res_inc$sd_iBS)
-  
   end1 <- Sys.time()
   landmarking_locf=difftime(end1,start1,units ="mins")
   
@@ -477,7 +545,7 @@ for(kkk in 1:NN){
     }
     
     # Fit GAMM on training longitudinal data (up to s)
-    gamm_fit <- gamm(Y1 ~ s(obstime) + x1 + x2,
+    gamm_fit <- gamm(Y1 ~ s(obstime,k = 3) + x1 + x2,
                      random = list(id = ~ 1 + obstime),
                      data = long_train_s)
     
@@ -625,34 +693,22 @@ for(kkk in 1:NN){
   
   
   
-  res_inc1 <- compute_iAUC_iBS(
-    s = S,
-    auc_mat=cbind(est1[,1],sd1[,1]), bs_mat=cbind(est1[,2],sd1[,2]), 
-    survtime=surv_valid$survtime, death=surv_valid$Event, t_pred=t_pred,
-    type = "incident",     # or "cumulative"
-    estimate_sd = TRUE, 
-    B = 200
-  )
-  
   
   
   end1 <- Sys.time()
   landmarking_lmm=difftime(end1,start1,units ="mins")
   
   
-  Results1[[kkk]]=list(iAUC_lmm=res_inc1$iAUC,
-                       iBS_lmm=res_inc1$iBS,
-                       est1=est1,
-                       landmarking_lmm=landmarking_lmm,
-                       
-                       iAUC_locf=res_inc$iAUC,
-                       iBS_locf=res_inc$iBS,
-                       est=est,
-                       landmarking_locf=landmarking_locf,
-                       
-                       Real=estr,
-                       iAUC_real=res_incr$iAUC, 
-                       iBS_real=res_incr$iBS)
+  Results1[[kkk]]=list(  
+    est1=est1,
+    landmarking_lmm=landmarking_lmm,
+    
+    
+    est=est,
+    landmarking_locf=landmarking_locf,
+    
+    Real=estr
+  )
   
   
   
@@ -674,26 +730,21 @@ for(kkk in 1:NN){
 
 
 Time1=matrix(0,NN,2)
-Cr0=Cr1=Cr2=matrix(0,NN,10)
+Cr0=Cr1=Cr2=matrix(0,NN,8)
 for(kkk in 1:NN){ 
   
   Time1[kkk,1]=Results1[[kkk]]$landmarking_lmm
   Time1[kkk,2]=Results1[[kkk]]$landmarking_locf
   
-  Cr0[kkk,]=c(as.numeric(Results1[[kkk]]$Real),c(Results1[[kkk]]$iAUC_real,Results1[[kkk]]$iBS_real))
-  Cr1[kkk,]=c(as.numeric(Results1[[kkk]]$est1),c(Results1[[kkk]]$iAUC_lmm,Results1[[kkk]]$iBS_lmm))
-  Cr2[kkk,]=c(as.numeric(Results1[[kkk]]$est),c(Results1[[kkk]]$iAUC_locf,Results1[[kkk]]$iBS_locf))
+  Cr0[kkk,]=c(as.numeric(Results1[[kkk]]$Real) )
+  Cr1[kkk,]=c(as.numeric(Results1[[kkk]]$est1) )
+  Cr2[kkk,]=c(as.numeric(Results1[[kkk]]$est) )
 }
 
 cbind(apply(Time1,2,mean),apply(Time1,2,sd))
 
 
-cbind(apply(Cr0,2,mean),apply(Cr0,2,sd))
-cbind(apply(Cr1,2,mean),apply(Cr1,2,sd))
-cbind(apply(Cr2,2,mean),apply(Cr2,2,sd))
-
-
-
-
-
+cbind(apply(Cr0,2,mean),apply(Cr0,2,sd))#real
+cbind(apply(Cr1,2,mean),apply(Cr1,2,sd))#landmarking_gamm
+cbind(apply(Cr2,2,mean),apply(Cr2,2,sd))#landmarking_locf
 
