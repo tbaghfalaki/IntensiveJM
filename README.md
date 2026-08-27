@@ -7,4 +7,4 @@ This page contains simulation study code corresponding to three scenarios presen
 
 
 ### Reference 
-Baghfalaki, T., Ganjali, M., & Jacqmin‑Gadda, H. others (2026). Methodological strategies for dynamic prediction in intensive longitudinal studies. *Submitted*.
+Baghfalaki, T., Ganjali, M., & Jacqmin‑Gadda, H. others (2026). Methodological strategies for dynamic prediction in intensive longitudinal studies. *Revised*.
