@@ -13,7 +13,7 @@ No single method was uniformly optimal across simulation and clinical settings. 
 
 
 # Describtion of this page
-This page contains simulation study code corresponding to three scenarios presented in the paper.
+This page contains simulation study code corresponding to   scenario 1 presented in the paper.
 
 
 ### Reference 
